@@ -162,6 +162,8 @@ class Settings:
     max_zip_expansion_ratio: int
 
     # API tuning
+    index_window_chunks: int
+    chroma_max_payload_mb: int
     embed_batch_size: int
     embed_max_retries: int
     api_timeout_seconds: int
@@ -267,6 +269,8 @@ def get_settings() -> Settings:
         max_zip_members=_int("MAX_ZIP_MEMBERS", 500, minimum=1),
         max_zip_total_mb=_int("MAX_ZIP_TOTAL_MB", 500, minimum=1),
         max_zip_expansion_ratio=_int("MAX_ZIP_EXPANSION_RATIO", 100, minimum=1),
+        index_window_chunks=_int("INDEX_WINDOW_CHUNKS", 256, minimum=1),
+        chroma_max_payload_mb=_int("CHROMA_MAX_PAYLOAD_MB", 4, minimum=1),
         embed_batch_size=_int("EMBED_BATCH_SIZE", 32, minimum=1),
         embed_max_retries=_int("EMBED_MAX_RETRIES", 5, minimum=0),
         api_timeout_seconds=_int("API_TIMEOUT_SECONDS", 120, minimum=1),

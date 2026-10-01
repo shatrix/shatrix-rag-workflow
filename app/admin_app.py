@@ -5,6 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 # Python puts the *script's* directory on sys.path[0], which for this file is
@@ -181,14 +182,39 @@ except VectorStoreError:
 progress_log: list[str] = []
 
 
-def progress(message: str) -> None:
-    progress_log.append(message)
+def make_progress_reporter(status_slot) -> Callable[[str], None]:
+    """Build a progress callback that updates the UI live.
+
+    The log used to be rendered only after the whole run finished, which for a
+    large document meant staring at an opaque spinner for many minutes with no
+    indication of whether anything was happening. Writing into a placeholder as
+    work proceeds makes the run observable.
+
+    Streamlit only repaints between script runs, so the placeholder is updated
+    on every message; the text is visible as soon as the run yields.
+    """
+
+    def progress(message: str) -> None:
+        progress_log.append(message)
+        stamp = f"{len(progress_log)}/…"
+        try:
+            status_slot.code(
+                f"[{stamp}] {message}\n" + "\n".join(progress_log[-12:]),
+                language="text",
+            )
+        except Exception:  # noqa: BLE001 - never let logging break indexing
+            pass
+
+    return progress
 
 
 report: IndexReport | None = None
+progress: Callable[[str], None] = lambda _message: None
 
 if index_uploaded and targets:
     with st.spinner("Indexing…"):
+        status_slot = st.empty()
+        progress = make_progress_reporter(status_slot)
         try:
             report = index_batch(
                 targets,
@@ -203,6 +229,8 @@ if index_uploaded and targets:
 
 elif rescan:
     with st.spinner("Scanning the documents folder…"):
+        status_slot = st.empty()
+        progress = make_progress_reporter(status_slot)
         try:
             report = rescan_directory(
                 settings.docs_dir,
@@ -217,6 +245,8 @@ elif rescan:
 
 elif rebuild:
     with st.spinner("Rebuilding the whole index…"):
+        status_slot = st.empty()
+        progress = make_progress_reporter(status_slot)
         try:
             report = rescan_directory(
                 settings.docs_dir,
@@ -256,8 +286,8 @@ if report is not None:
         )
 
     if progress_log:
-        with st.expander("Log"):
-            st.code("\n".join(progress_log[-200:]), language="text")
+        with st.expander(f"Progress log ({len(progress_log)} entries)"):
+            st.code("\n".join(progress_log[-400:]), language="text")
 
 # ── index management ──────────────────────────────────────────────────────
 

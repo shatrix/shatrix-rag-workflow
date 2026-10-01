@@ -74,6 +74,20 @@ class ConversionError(RuntimeError):
     """A file could not be converted to text."""
 
 
+def _quiet_pdf_loggers() -> None:
+    """Silence a per-page pdfminer warning that floods logs on big PDFs.
+
+    pdfminer emits "Could not get FontBBox from font descriptor because None
+    cannot be parsed as 4 floats" for many pages in a normal document. On a
+    1400-page PDF that buries the actual progress output under thousands of
+    lines. It is benign -- pdfminer recovers and extraction succeeds.
+    """
+    import logging
+
+    for name in ("pdfminer", "pdfplumber", "pdfminer.layout", "pdfminer.converter"):
+        logging.getLogger(name).setLevel(logging.ERROR)
+
+
 @lru_cache(maxsize=1)
 def _converter(vision_model: str):
     """Build (and cache) a MarkItDown instance.
@@ -115,6 +129,8 @@ def _convert_bytes(
     """Convert raw bytes to Markdown. Returns ``(markdown, title)``."""
     from markitdown import StreamInfo
 
+    _quiet_pdf_loggers()
+
     stream_info = StreamInfo(extension=extension, filename=filename)
     stream = io.BytesIO(data)
 
@@ -137,7 +153,18 @@ def _convert_bytes(
     # Titles are display metadata, so keep only the first line.
     if title:
         title = title.splitlines()[0].strip()
-    if not title:
+
+    # A PDF's title is inferred from the first text on its first page. For a
+    # short document that is usually fine, but on a long one it is whatever
+    # happened to be at the top of page one -- a header, a licence preamble, a
+    # stray code fragment. Because the title is prepended to every chunk, one
+    # bad title contaminates the whole document's embeddings. Prefer a real
+    # Markdown heading, then the filename.
+    if extension == ".pdf":
+        # Fall back to the filename rather than keeping a guess derived from
+        # the first line of page one.
+        title = _first_heading(markdown) or Path(filename).stem
+    elif not title:
         title = _first_heading(markdown) or Path(filename).stem
 
     return markdown, title

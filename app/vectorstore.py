@@ -253,41 +253,131 @@ def server_batch_size(client: ClientAPI, fallback: int = 64) -> int:
 #: Used when the server's real limit cannot be determined.
 DEFAULT_BATCH_SIZE = 64
 
+#: Conservative ceiling on the JSON size of one upsert request.
+#:
+#: The server's ``max_batch_size`` is a *record count* limit, not a payload
+#: limit, so it cannot be trusted on its own. Each record carries one
+#: embedding, and a 2048-dimensional float vector serialises to roughly 20
+#: bytes per value, so a single record is ~40 KB. Sending thousands at once is
+#: what produced a "Payload too large" failure on a 1400-page PDF.
+#:
+#: Keep well under typical reverse-proxy body limits (nginx defaults to 1 MB).
+DEFAULT_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024
+
+#: JSON bytes assumed per embedding value. ``repr`` of a float is up to 19
+#: characters, plus a separator, and JSON escaping can add more, so 22 leaves
+#: headroom without being wildly pessimistic.
+BYTES_PER_FLOAT = 22
+
+
+def estimate_record_bytes(record: ChunkRecord) -> int:
+    """Approximate the JSON size of one upsert record.
+
+    Overestimates on purpose: sizing batches from an estimate that is slightly
+    too large is harmless, whereas one that is too small causes the write to
+    fail.
+    """
+    meta_bytes = sum(len(str(k)) + len(str(v)) + 8 for k, v in record.metadata().items())
+    return (
+        len(record.text) * 2  # UTF-8, plus escaping of newlines and quotes
+        + len(record.vector) * BYTES_PER_FLOAT
+        + meta_bytes
+        + len(record.id) * 2
+        + 128  # field names, brackets, commas
+    )
+
+
+def plan_batches(
+    records: Sequence[ChunkRecord],
+    *,
+    max_records: int,
+    max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+) -> list[Sequence[ChunkRecord]]:
+    """Split records into batches that respect both limits.
+
+    A batch ends when it hits ``max_records`` or when adding the next record
+    would exceed ``max_payload_bytes``.
+    """
+    if not records:
+        return []
+
+    batches: list[Sequence[ChunkRecord]] = []
+    current: list[ChunkRecord] = []
+    current_bytes = 0
+
+    for record in records:
+        size = estimate_record_bytes(record)
+        if current and (
+            len(current) >= max_records or current_bytes + size > max_payload_bytes
+        ):
+            batches.append(current)
+            current = []
+            current_bytes = 0
+        current.append(record)
+        current_bytes += size
+
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _is_payload_error(exc: Exception) -> bool:
+    """Recognise a request-body-too-large rejection."""
+    message = str(exc).lower()
+    return "payload too large" in message or "request entity too large" in message or (
+        getattr(exc, "status_code", None) == 413
+    )
+
 
 def upsert_chunks(
     collection: Collection,
     records: Sequence[ChunkRecord],
     *,
     batch_size: int | None = None,
+    max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
     client: ClientAPI | None = None,
     on_batch=None,
 ) -> int:
-    """Write chunks to Chroma, batching to the server's limit.
+    """Write chunks to Chroma in batches that fit both limits.
 
     Chunk ids are deterministic (derived from the document hash), so
     re-indexing the same content overwrites in place instead of duplicating.
 
+    If the server still rejects a batch for being too large, the batch is split
+    in half and retried, so an unexpectedly small server limit degrades
+    throughput instead of losing the write.
+
     Args:
-        batch_size: Explicit chunk batch size. Callers that already know the
+        batch_size: Explicit record-count cap. Callers that already know the
             server's limit should pass it, so the HTTP layer need not be
             consulted per file.
-        client: Chroma client used to query the server's limit when
+        max_payload_bytes: Ceiling on the estimated JSON size per request.
+        client: Chroma client used to query the server's record limit when
             ``batch_size`` is not given.
+        on_batch: Optional ``callback(done, total)``.
     """
     if not records:
         return 0
 
     if batch_size is not None:
-        limit = max(1, min(int(batch_size), 5_000))
+        max_records = max(1, min(int(batch_size), 5_000))
     elif client is not None:
-        limit = server_batch_size(client)
+        max_records = server_batch_size(client)
     else:
-        limit = DEFAULT_BATCH_SIZE
-    total = (len(records) + limit - 1) // limit
-    written = 0
+        max_records = DEFAULT_BATCH_SIZE
 
-    for batch_index, start in enumerate(range(0, len(records), limit), start=1):
-        batch = records[start : start + limit]
+    batches = plan_batches(
+        records, max_records=max_records, max_payload_bytes=max_payload_bytes
+    )
+    written = 0
+    done = 0
+
+    # A stack of batches still to write; oversized ones get pushed back split.
+    pending: list[Sequence[ChunkRecord]] = list(batches)
+    queue = list(reversed(pending))
+
+    while queue:
+        batch = queue.pop()
         try:
             collection.upsert(
                 ids=[r.id for r in batch],
@@ -296,12 +386,21 @@ def upsert_chunks(
                 metadatas=[r.metadata() for r in batch],
             )
         except Exception as exc:  # noqa: BLE001
+            if _is_payload_error(exc) and len(batch) > 1:
+                # Halve and retry rather than losing the whole run.
+                mid = len(batch) // 2
+                queue.append(batch[mid:])
+                queue.append(batch[:mid])
+                continue
             raise VectorStoreError(
-                f"Failed writing batch {batch_index}/{total} to Chroma: {exc}"
+                f"Failed writing {written}/{len(records)} records to Chroma "
+                f"after {done} successful batches: {exc}"
             ) from exc
+
         written += len(batch)
+        done += 1
         if on_batch is not None:
-            on_batch(batch_index, total)
+            on_batch(written, len(records))
 
     return written
 

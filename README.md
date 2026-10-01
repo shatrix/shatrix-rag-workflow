@@ -441,6 +441,23 @@ upload → sanitise → save to data/documents → convert to Markdown
 5. **Upsert.** Deterministic ids (`<file-hash>:<index>`) mean re-indexing the
    same content overwrites rather than duplicates.
 
+### Two details that matter for real documents
+
+**Code fences are respected when detecting headings.** Every technical
+document contains shell, C, Python, YAML or BitBake comments that begin with
+`#`. Treating those as section headings puts a misleading breadcrumb in front
+of every chunk — a chunk titled `ifndef HELLOLIB_H` from a C header in an
+unrelated example. The splitter tracks fenced blocks and never reads a
+heading out of one.
+
+**No derived document title is stored.** Converters infer titles
+inconsistently: for a PDF the title is whatever text sat at the top of page one,
+which on a long manual is a licence banner or a stray code fragment. Because
+the title would be prepended to every chunk, one bad value contaminates every
+embedding and every prompt. Identity comes from the filename, which is the one
+thing reliably known for every format, and structure comes from the heading
+breadcrumb the splitter already produces.
+
 ### Change detection
 
 Before embedding anything, the app compares each file's SHA-256 with the hash
@@ -481,6 +498,50 @@ Changing `RAG_CHUNK_CHARS` or `RAG_CHUNK_OVERLAP_CHARS` also warrants a
 re-index, since chunk boundaries change.
 
 ---
+
+## Large documents
+
+A 1400-page PDF produces roughly 3,700 chunks. Two things follow from that.
+
+**Index big files from the command line, not the browser.** The admin interface
+is fine for a handful of documents, but a long run is tied to your browser
+session and can be cancelled if the tab is closed or reconnects. Use the CLI
+instead:
+
+```bash
+./scripts/index.py --dry-run                    # show what would be indexed
+./scripts/index.py --file data/documents/big.pdf
+
+# detached, for a job that takes a while
+nohup .venv/bin/python scripts/index.py --file data/documents/big.pdf \
+    > /tmp/index.log 2>&1 &
+tail -f /tmp/index.log
+```
+
+`scripts/index.py` with no arguments re-scans the whole documents folder and
+skips files whose content has not changed. Options:
+
+| Option | Effect |
+|---|---|
+| `--file PATH` | Index specific files (repeatable) |
+| `--dry-run` | List targets and exit without writing |
+| `--force` | Re-index even if unchanged |
+| `--window N` | Chunks per embed-and-write pass |
+
+**Progress is incremental.** Chunks are embedded and written to Chroma in
+windows of `INDEX_WINDOW_CHUNKS` (default 256) rather than all at once. Work
+already written is kept if a later window fails, the collection fills up as it
+goes instead of staying empty until the end, and peak memory stays bounded.
+
+**Writes are sized by bytes, not just record count.** Each chunk carries a
+2048-dimension vector, which serialises to about 40 KB of JSON, so a few
+thousand chunks would otherwise be one ~150 MB request. Requests are capped at
+4 MB, which for a 2048-dimension model is roughly 85 chunks each — about 45
+requests for a 1400-page document. If a server's real limit is lower still, the
+affected batch is split in half and retried rather than failing the run.
+
+Expect a few minutes per thousand pages. The bulk of the time is embedding,
+which is rate limited on the free tier.
 
 ## Cost and rate limits
 
@@ -571,6 +632,34 @@ between the documents' language and the embedding model.
 **"little or no text extracted"** — expected for scanned PDFs and image-only
 files. See [supported formats](#supported-file-formats).
 
+**Everything indexed but answers are poor** — check the passage headers in the
+Sources panel. Each chunk starts with `Source: <filename>`, and any heading
+breadcrumb follows it in the text. If headings look like code (`#if`, `# sudo`),
+or the passages all carry a nonsense `Title:`, you are on an older revision —
+see *Two details that matter for real documents* above and re-index with
+`./scripts/index.py --force`.
+
+**`Failed writing batch to Chroma: Payload too large`** — a very large document
+produced more chunks than fit in one request. Raise `INDEX_WINDOW_CHUNKS`'s
+sibling limit by lowering the payload budget, or just use `scripts/index.py`,
+which handles this automatically. If it persists, `EMBED_MAX_PAYLOAD` can be
+tuned in `.env`.
+
+**Indexing a large PDF appears to hang** — check progress rather than assuming:
+
+```bash
+.venv/bin/python scripts/index.py --dry-run      # is the file visible?
+journalctl --user -u rag-admin.service -n 50     # any errors?
+.venv/bin/python -c "
+import sys; sys.path.insert(0,'.')
+from app.config import get_settings
+from app.vectorstore import connect, open_collection, count
+s=get_settings(); print(count(open_collection(connect(s),s)), 'chunks')"
+```
+
+Chunk count rising means it is working. Conversion of a 1400-page PDF takes
+about two minutes before any embedding starts.
+
 **A document indexed twice** — it should not be possible with deterministic
 ids. If you see it, run **Delete the entire collection and start over** and
 report it.
@@ -611,6 +700,7 @@ contain `User=` (systemd rejects it there), and must not redirect logs into
 │   └── admin_app.py    # the admin interface
 ├── scripts/
 │   ├── setup.sh              # venv, deps, .env, verification
+│   ├── index.py              # index from the command line
 │   ├── run-local.sh          # foreground, no systemd
 │   ├── install-services.sh   # render and enable systemd user units
 │   ├── uninstall-services.sh

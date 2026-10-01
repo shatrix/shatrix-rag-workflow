@@ -142,3 +142,28 @@ class TestOverlap:
             first_word = chunk.text.split()[0]
             # A hard mid-word cut would leave punctuation or a fragment.
             assert first_word.isalnum()
+
+class TestJunkHeadingRejection:
+    """Real PDFs contain '#' lines that are code, not section headings."""
+
+    @pytest.mark.parametrize(
+        "line",
+        ['# "', '# !!!', '# ----', '#'],
+    )
+    def test_punctuation_only_headings_are_not_headings(self, line: str) -> None:
+        chunks = chunk_text(f"# Real Title\n\nBody text.\n\n{line}\n\nMore.",
+                            chunk_chars=2000)
+        headings = {c.heading for c in chunks}
+        assert all("Real Title" in h or not h for h in headings), headings
+
+    @pytest.mark.parametrize("heading", ["A", "C", "1", "Q3"])
+    def test_short_but_real_headings_are_kept(self, heading: str) -> None:
+        chunks = chunk_text(f"# {heading}\n\nSome body text here.",
+                            chunk_chars=2000)
+        assert any(chunks[0].heading == heading for _ in [0])
+
+    def test_absurdly_long_hash_line_is_not_a_heading(self) -> None:
+        line = "# " + ("x" * 300)
+        chunks = chunk_text(f"# Real Title\n\nBody.\n\n{line}\n",
+                            chunk_chars=2000)
+        assert not any("x" * 50 in c.heading for c in chunks)

@@ -38,6 +38,19 @@ class Chunk:
         return len(self.text)
 
 
+def _is_plausible_heading(text: str) -> bool:
+    """Reject hash-prefixed lines that cannot be real headings.
+
+    A line made only of punctuation or symbols (``# "``, ``# ---``) is never a
+    useful heading, and an implausibly long one is almost always mis-detected
+    text. Short headings are fine.
+    """
+    stripped = text.strip()
+    if len(stripped) > 100:
+        return False
+    return any(char.isalnum() for char in stripped)
+
+
 @dataclass(frozen=True)
 class _Section:
     heading: str
@@ -135,10 +148,24 @@ def _sections(text: str) -> list[_Section]:
     heading = ""
     breadcrumb: list[str] = []
     current: list[str] = []
+    fence = ""
 
     for line in text.splitlines():
-        match = _HEADING_RE.match(line)
-        if match:
+        fence_match = _FENCE_RE.match(line)
+        if fence_match:
+            # Track fences so that a '#' line inside a code block is never
+            # mistaken for a heading. Shell, C, Python and BitBake comments all
+            # begin with '#', and they are not section headings.
+            marker = fence_match.group(1)
+            if not fence:
+                fence = marker
+            elif marker == fence:
+                fence = ""
+            current.append(line)
+            continue
+
+        match = None if fence else _HEADING_RE.match(line)
+        if match and _is_plausible_heading(match.group(2)):
             if current:
                 sections.append(_Section(heading, "\n".join(current)))
                 current = []

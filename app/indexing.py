@@ -46,6 +46,8 @@ class IndexOutcome:
     chunks_written: int = 0
     chunks_skipped: int = 0
     units: int = 1
+    #: SHA-256 prefix of the source bytes, so callers can record change state.
+    content_hash: str = ""
     warnings: list[str] = field(default_factory=list)
     elapsed: float = 0.0
 
@@ -125,15 +127,21 @@ def _build_records(
             continue
 
         # Prefix each chunk with its origin so the embedding and the LLM both
-        # know which document and section a passage came from.
-        header = (
-            f"Source: {unit.source} :: {unit.member_path}"
+        # know which document a passage came from. The filename is the
+        # identifier: it is the one thing reliably known for every format.
+        #
+        # No separate title is prepended. Every converter derives one
+        # differently and unreliably -- for PDFs it is whatever text sat at the
+        # top of page one, which for a long manual is a licence header or a
+        # stray code fragment. A wrong title prepended to every chunk
+        # contaminates every embedding and every prompt, so the heading
+        # breadcrumb the chunker already produces carries the structure
+        # instead.
+        prefix = (
+            f"Source: {unit.source} :: {unit.member_path}\n\n"
             if unit.member_path
-            else f"Source: {unit.source}"
+            else f"Source: {unit.source}\n\n"
         )
-        if unit.title:
-            header += f"\nTitle: {unit.title}"
-        prefix = header + "\n\n"
 
         body_limit = max(limit - len(prefix), 200)
         for chunk in chunk_text(
@@ -166,6 +174,8 @@ def index_file(
     force: bool = False,
     source: str | None = None,
     batch_size: int | None = None,
+    window_chunks: int | None = None,
+    max_payload_bytes: int | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> IndexOutcome:
     """Index a single file, skipping it when its content is already present.
@@ -210,6 +220,7 @@ def index_file(
             return IndexOutcome(
                 file_name=name,
                 status="unchanged",
+                content_hash=digest,
                 detail="content unchanged since last index",
                 elapsed=time.perf_counter() - started,
             )
@@ -250,72 +261,109 @@ def index_file(
             elapsed=time.perf_counter() - started,
         )
 
-    say(f"embedding {len(chunks)} chunk(s) from {name}...")
-    try:
-        vectors = client.embed_batched(
-            [c.text for c in chunks],
-            on_batch=lambda done, total: say(
-                f"{name}: embedding batch {done}/{total}"
-            ),
-        )
-    except OpenRouterError as exc:
-        return IndexOutcome(
-            file_name=name,
-            status="failed",
-            detail=str(exc),
-            units=len(units),
-            warnings=warnings,
-            elapsed=time.perf_counter() - started,
-        )
+    total = len(pairs)
+    window = max(1, window_chunks or settings.index_window_chunks)
+    say(
+        f"{name}: {total} chunk(s) to index, "
+        f"{len(units)} unit(s), writing every {window}"
+    )
 
-    if len(vectors) != len(chunks):  # pragma: no cover - defensive
-        return IndexOutcome(
-            file_name=name,
-            status="failed",
-            detail=(
-                f"embedding count mismatch: sent {len(chunks)} chunks, "
-                f"received {len(vectors)} vectors"
-            ),
-            units=len(units),
-            warnings=warnings,
-            elapsed=time.perf_counter() - started,
-        )
+    # Embed and write in windows rather than all at once. A 1400-page PDF
+    # produces thousands of chunks; embedding everything before writing
+    # anything means a failure near the end loses all of it, and leaves the
+    # collection empty until the very last request. Windows make progress
+    # durable and observable, and cap peak memory.
+    written = 0
+    for offset in range(0, total, window):
+        window_pairs = pairs[offset : offset + window]
+        slice_chunks = [c for c, _ in window_pairs]
 
-    records = [
-        ChunkRecord(
-            id=chunk_id(digest, chunk.index),
-            text=chunk.text,
-            vector=vector,
-            source=name,
-            doc_id=digest,
-            chunk_index=chunk.index,
-            content_hash=digest,
-            heading=chunk.heading,
-            source_zip=unit.source_zip,
-            member_path=unit.member_path,
-        )
-        for (chunk, unit), vector in zip(pairs, vectors)
-    ]
+        try:
+            vectors = client.embed_batched(
+                [c.text for c in slice_chunks],
+                on_batch=lambda done, batches, o=offset: say(
+                    f"{name}: embedding {o + done * settings.embed_batch_size}"
+                    f"/{total} chunk(s)"
+                ),
+            )
+        except OpenRouterError as exc:
+            return IndexOutcome(
+                file_name=name,
+                status="failed",
+                detail=(
+                    f"{exc} (stopped after {written}/{total} chunks were "
+                    f"already written and kept)"
+                ),
+                units=len(units),
+                chunks_written=written,
+                warnings=warnings,
+                elapsed=time.perf_counter() - started,
+            )
 
-    say(f"writing {len(records)} chunk(s) to Chroma...")
-    try:
-        written = upsert_chunks(collection, records, batch_size=batch_size)
-    except VectorStoreError as exc:
-        return IndexOutcome(
-            file_name=name,
-            status="failed",
-            detail=str(exc),
-            units=len(units),
-            chunks_skipped=len(records),
-            warnings=warnings,
-            elapsed=time.perf_counter() - started,
-        )
+        if len(vectors) != len(slice_chunks):  # pragma: no cover - defensive
+            return IndexOutcome(
+                file_name=name,
+                status="failed",
+                detail=(
+                    f"embedding count mismatch in window at {offset}: sent "
+                    f"{len(slice_chunks)} chunks, received {len(vectors)} "
+                    f"vectors"
+                ),
+                units=len(units),
+                chunks_written=written,
+                warnings=warnings,
+                elapsed=time.perf_counter() - started,
+            )
+
+        records = [
+            ChunkRecord(
+                id=chunk_id(digest, chunk.index),
+                text=chunk.text,
+                vector=vector,
+                source=name,
+                doc_id=digest,
+                chunk_index=chunk.index,
+                content_hash=digest,
+                heading=chunk.heading,
+                source_zip=unit.source_zip,
+                member_path=unit.member_path,
+            )
+            for (chunk, unit), vector in zip(window_pairs, vectors)
+        ]
+
+        try:
+            written += upsert_chunks(
+                collection,
+                records,
+                batch_size=batch_size,
+                max_payload_bytes=(
+                    max_payload_bytes
+                    if max_payload_bytes is not None
+                    else settings.chroma_max_payload_mb * 1024 * 1024
+                ),
+            )
+        except VectorStoreError as exc:
+            return IndexOutcome(
+                file_name=name,
+                status="failed",
+                detail=(
+                    f"{exc} (stopped after {written}/{total} chunks were "
+                    f"already written and kept)"
+                ),
+                units=len(units),
+                chunks_written=written,
+                warnings=warnings,
+                elapsed=time.perf_counter() - started,
+            )
+
+        say(f"{name}: indexed {written}/{total} chunk(s)")
 
     return IndexOutcome(
         file_name=name,
         status="indexed",
         detail=f"{written} chunk(s) across {len(units)} unit(s)",
         chunks_written=written,
+        content_hash=digest,
         units=len(units),
         warnings=warnings,
         elapsed=time.perf_counter() - started,
@@ -330,6 +378,8 @@ def index_batch(
     settings: Settings | None = None,
     force: bool = False,
     batch_size: int | None = None,
+    window_chunks: int | None = None,
+    max_payload_bytes: int | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> IndexReport:
     """Index many files, re-reading the change-detection map between files.
@@ -351,6 +401,8 @@ def index_batch(
             existing_hashes=hashes,
             force=force,
             batch_size=batch_size,
+            window_chunks=window_chunks,
+            max_payload_bytes=max_payload_bytes,
             progress=progress,
         )
         report.outcomes.append(outcome)
@@ -373,6 +425,8 @@ def rescan_directory(
     force: bool = False,
     extensions: list[str] | None = None,
     batch_size: int | None = None,
+    window_chunks: int | None = None,
+    max_payload_bytes: int | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> IndexReport:
     """Index every supported file sitting in the documents directory."""
@@ -402,5 +456,7 @@ def rescan_directory(
         settings=settings,
         force=force,
         batch_size=batch_size,
+        window_chunks=window_chunks,
+        max_payload_bytes=max_payload_bytes,
         progress=progress,
     )
