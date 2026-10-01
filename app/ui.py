@@ -37,9 +37,14 @@ def get_collection(
     *,
     create: bool = True,
 ) -> tuple[object, Collection]:
-    """Connect to Chroma and open the collection. Cached per process."""
-    client = connect(settings)
-    return client, open_collection(client, settings, create=create)
+    """Connect to Chroma and open the collection. Cached per process.
+
+    Returns ``(chroma_client, collection)``. Note this is the *vector store*
+    client -- it has no ``embed`` method. Use :func:`get_client` for the
+    OpenRouter client.
+    """
+    chroma_client = connect(settings)
+    return chroma_client, open_collection(chroma_client, settings, create=create)
 
 
 def show_config_banner(settings: Settings) -> None:
@@ -87,11 +92,14 @@ def sidebar_status(settings: Settings) -> None:
         )
 
 
-def require_ready(settings: Settings, *, role: str) -> tuple[object, Collection] | None:
+def require_ready(
+    settings: Settings, *, role: str
+) -> tuple[OpenRouterClient, Collection] | None:
     """Check every precondition, showing the reason and stopping if unmet.
 
-    Returns ``(client, collection)`` when ready, otherwise ``None`` after
-    calling ``st.stop()``.
+    Returns ``(router, collection)`` when ready -- ``router`` is the OpenRouter
+    client, which is what :mod:`app.rag` expects for embedding and generation.
+    Otherwise returns ``None`` after calling ``st.stop()``.
     """
     if not settings.openrouter_api_key:
         st.error(
@@ -105,7 +113,7 @@ def require_ready(settings: Settings, *, role: str) -> tuple[object, Collection]
         return None
 
     try:
-        client, collection = get_collection(settings, create=True)
+        _, collection = get_collection(settings, create=True)
     except VectorStoreError as exc:
         st.error(f"**Cannot reach the vector store.**\n\n{exc}")
         st.stop()
@@ -128,7 +136,7 @@ def require_ready(settings: Settings, *, role: str) -> tuple[object, Collection]
         st.stop()
         return None
 
-    return client, collection
+    return get_client(settings), collection
 
 
 def friendly_error(exc: Exception) -> None:

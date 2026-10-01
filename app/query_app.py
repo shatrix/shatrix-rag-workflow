@@ -73,7 +73,9 @@ with st.sidebar:
 
 ready = require_ready(settings, role="Query")
 if ready is not None:
-    client, collection = ready
+    # router talks to OpenRouter (embeddings + chat); collection is the vector
+    # store. They are different objects with different methods.
+    router, collection = ready
 
     sidebar_status(settings)
 
@@ -109,7 +111,7 @@ if ready is not None:
         ]
 
         try:
-            hits = retrieve(question, collection, client, top_k=top_k)
+            hits = retrieve(question, collection, router, top_k=top_k)
 
             messages = build_messages(
                 question, hits, history=history_for_prompt, settings=settings
@@ -124,7 +126,7 @@ if ready is not None:
                 if show_reasoning:
                     reasoning_box = st.expander("Reasoning", expanded=False)
 
-                for content, reasoning in client.stream_chat(
+                for content, reasoning in router.stream_chat(
                     messages,
                     show_reasoning=show_reasoning,
                     temperature=temperature,
