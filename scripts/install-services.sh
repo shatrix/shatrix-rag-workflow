@@ -161,9 +161,11 @@ for unit in "${UNITS[@]}"; do
     template="$TEMPLATE_DIR/$unit.template"
     destination="$UNIT_DIR/$unit"
 
-    if [ "$REINSTALL" -eq 0 ] && [ -f "$destination" ] && [ "${START:-1}" -eq 0 ]; then
-        info "$unit already installed (left alone)"
-        continue
+    # Always re-render. Rendering is deterministic, so re-running this script
+    # after editing .env must pick up the new ports, paths and bind address --
+    # skipping existing files would silently leave stale configuration in place.
+    if [ -f "$destination" ]; then
+        info "refreshing $unit with current configuration"
     fi
 
     render "$template" "$destination"

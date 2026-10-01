@@ -575,16 +575,60 @@ over a longer period. Nothing in this repository points at a paid model.
 **This is a local, single-user tool.** Please read this before exposing it.
 
 - **The admin app has no authentication.** Anyone who can reach its port can
-  upload documents, re-index, and delete your entire collection.
+  upload documents, re-index, and delete your entire collection. There is no
+  password, no login, and no CSRF protection.
 - **Both apps bind to `127.0.0.1` by default**, so they are reachable only from
   your own machine.
-- If you set `APP_BIND_ADDRESS` to anything else, both interfaces become
-  reachable from the network. The admin app shows a red warning on startup when
-  you do.
+- Setting `APP_BIND_ADDRESS` to `0.0.0.0` exposes both interfaces to every
+  machine on your network. Both the admin app and `scripts/install-services.sh`
+  display a warning when you do.
 
-If you need network access, put the apps behind a reverse proxy that
-terminates TLS and requires authentication. Do not expose the admin app
-directly.
+### Exposing the interfaces to your network
+
+```bash
+# .env
+APP_BIND_ADDRESS=0.0.0.0
+
+./scripts/install-services.sh     # re-render the units, then restart them
+```
+
+`CHROMA_HOST` is separate, so the vector store stays on `127.0.0.1` and is not
+exposed even when the interfaces are. Keep it that way: Chroma has no
+authentication either, and it grants full read/write access to your index.
+
+Because the admin app is unauthenticated, treat network access as
+trust-the-whole-network. If that is not acceptable, the options are:
+
+**Basic auth with a reverse proxy** — strongest option. Keep both apps on
+`127.0.0.1` and let the proxy be the only thing listening. With Caddy:
+
+```
+rag.example.com {
+    basicauth {
+        admin $2a$14$...
+    }
+    reverse_proxy 127.0.0.1:8901
+}
+
+admin.rag.example.com {
+    basicauth {
+        admin $2a$14$...
+    }
+    reverse_proxy 127.0.0.1:8902
+}
+```
+
+Generate the hash with `caddy hash-password`. This adds TLS as well, so
+credentials are not sent in clear text.
+
+**SSH tunnel** — exposes nothing at all:
+
+```bash
+ssh -L 8901:127.0.0.1:8901 -L 8902:127.0.0.1:8902 you@this-host
+```
+
+Then browse to `127.0.0.1:8901` locally. The apps stay on loopback, so nothing
+is reachable from the network, yet you get remote access.
 
 Upload handling is hardened regardless of exposure:
 
@@ -620,6 +664,16 @@ Index in smaller batches if it keeps recurring.
 
 **Chroma returns `404` on `http://127.0.0.1:8888/`** — that is normal. It is an
 API server, not a website. Use `/api/v2/heartbeat`.
+
+**Exposed to the network unintentionally** — check the binding:
+
+```bash
+ss -tlnp | grep -E '8901|8902'
+```
+
+`127.0.0.1:8901` is private to this machine. `0.0.0.0:8901` means every host
+that can route to this machine can reach it. Set `APP_BIND_ADDRESS=127.0.0.1`
+in `.env` and re-run `./scripts/install-services.sh`.
 
 **`Address already in use`** — something else holds the port. Change
 `CHROMA_PORT` / `QUERY_APP_PORT` / `ADMIN_APP_PORT` in `.env`, then re-run

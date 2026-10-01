@@ -30,6 +30,11 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setenv("CHROMA_DIR", str(tmp_path / "data" / "chroma"))
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test-key-for-unit-tests")
 
+    # Pinned so assertions about the default configuration do not change
+    # depending on what the developer's own .env happens to say. Without this,
+    # setting APP_BIND_ADDRESS=0.0.0.0 locally would fail unrelated tests.
+    monkeypatch.setenv("APP_BIND_ADDRESS", "127.0.0.1")
+
     settings = reload_settings()
     settings.ensure_dirs()
     yield settings
