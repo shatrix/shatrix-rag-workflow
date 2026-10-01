@@ -1,0 +1,1 @@
+"""rag-workflow: a small RAG stack served entirely through OpenRouter."""

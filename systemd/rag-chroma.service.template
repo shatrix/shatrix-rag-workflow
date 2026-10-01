@@ -1,0 +1,52 @@
+# ============================================================================
+# TEMPLATE -- this file is not a valid systemd unit.
+#
+# It contains double-brace placeholder tokens and will be rejected by
+# systemd if you try to install it directly. Render it with:
+#
+#     ./scripts/install-services.sh
+#
+# which substitutes real paths and writes the result to
+# ~/.config/systemd/user/rag-chroma.service.
+# ============================================================================
+
+[Unit]
+Description=rag-workflow: ChromaDB vector store
+Documentation=https://docs.trychroma.com/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# User units must NOT contain User=/Group=. systemd rejects those directives
+# in ~/.config/systemd/user.
+#
+# No StandardOutput=append:/var/log/... either: a non-root user cannot write
+# there. Logs go to the journal, readable with:
+#     journalctl --user -u rag-chroma.service -f
+
+WorkingDirectory={{PROJECT_ROOT}}
+
+# -prefixed EnvironmentFile is optional, so the unit still starts (and reports
+# a clear error in the UI) when .env has not been created yet.
+EnvironmentFile=-{{PROJECT_ROOT}}/.env
+Environment="PYTHONUNBUFFERED=1"
+
+ExecStart={{VENV_DIR}}/bin/chroma run \
+    --path {{CHROMA_DIR}} \
+    --host {{CHROMA_HOST}} \
+    --port {{CHROMA_PORT}}
+
+Restart=always
+RestartSec=5
+# Do not give up if Chroma keeps failing; it is the dependency for both UIs.
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+# Light hardening that does not risk breaking a fresh install.
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

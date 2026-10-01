@@ -1,0 +1,52 @@
+# ── Secrets ────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Virtual environments ───────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Runtime data: uploaded documents and the Chroma index ──────────────────
+# These are machine-local. The index is tied to the configured embedding
+# model + dimensionality and must never be committed.
+data/
+
+# ── Rendered systemd units ────────────────────────────────────────────────
+# Written to ~/.config/systemd/user/ by scripts/install-services.sh; the
+# checked-in files under systemd/ are templates only.
+*.rendered.service
+rendered/
+
+# ── Python ─────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ── Test / type / lint caches ─────────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ── Logs ───────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Editors and OS ────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

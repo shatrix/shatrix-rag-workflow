@@ -1,0 +1,39 @@
+# ============================================================================
+# TEMPLATE -- not a valid unit until rendered by ./scripts/install-services.sh
+#
+#   ->  ~/.config/systemd/user/rag-query.service
+# ============================================================================
+
+[Unit]
+Description=rag-workflow: query interface
+Documentation=file://{{PROJECT_ROOT}}/README.md
+After=network-online.target rag-chroma.service
+Wants=network-online.target
+# Only start Chroma if it is not already running; do not stop it afterwards.
+Wants=rag-chroma.service
+
+[Service]
+Type=simple
+WorkingDirectory={{PROJECT_ROOT}}
+EnvironmentFile=-{{PROJECT_ROOT}}/.env
+Environment="PYTHONUNBUFFERED=1"
+Environment="STREAMLIT_SERVER_HEADLESS=true"
+Environment="STREAMLIT_BROWSER_GATHER_USAGE_STATS=false"
+
+ExecStart={{VENV_DIR}}/bin/streamlit run {{PROJECT_ROOT}}/app/query_app.py \
+    --server.port {{QUERY_PORT}} \
+    --server.address {{BIND_ADDRESS}} \
+    --server.headless true \
+    --server.maxUploadSize {{MAX_UPLOAD_MB}} \
+    --browser.gatherUsageStats false
+
+Restart=always
+RestartSec=5
+
+# The app reads the vector store and writes nothing outside memory, but the
+# read-only filesystem plus this path keeps Streamlit's temp files working.
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

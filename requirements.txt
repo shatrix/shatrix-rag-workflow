@@ -1,0 +1,23 @@
+# Core dependencies for rag-workflow.
+#
+# The chat model and the embedding model are both served remotely over the
+# OpenRouter API, so nothing here downloads or runs a model locally and no
+# deep-learning runtime is required.
+#
+# markitdown extras are listed individually rather than using [all]; [all]
+# would drag in the Azure Document Intelligence / Content Understanding SDKs,
+# pandas and youtube-transcript-api, none of which this project uses.
+
+streamlit>=1.40,<2
+chromadb>=1.0,<2
+openai>=1.68,<4
+python-dotenv>=1.0,<2
+
+# Document -> Markdown conversion.
+#   [pdf]    -> pdfminer-six, pdfplumber
+#   [docx]   -> mammoth, lxml, olefile
+#   [pptx]   -> python-pptx
+#   [xlsx]   -> openpyxl, pandas, xlrd
+#   [xls]    -> pandas, xlrd
+#   [outlook]-> olefile
+markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.8,<0.2
