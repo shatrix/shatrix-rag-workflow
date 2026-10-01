@@ -20,7 +20,12 @@ if _ROOT not in sys.path:
 from app.config import config_warnings, get_settings
 from app.documents import ConversionError, store_upload
 from app.formats import resolve_statuses, supported_extensions
-from app.indexing import IndexReport, index_batch, rescan_directory
+from app.indexing import (
+    IndexReport,
+    estimate_chunks,
+    index_batch,
+    rescan_directory,
+)
 from app.ui import footer, friendly_error, get_client
 from app.vectorstore import (
     VectorStoreError,
@@ -81,14 +86,13 @@ warning = dimension_warning(collection, settings)
 if warning:
     st.error(f"**Embedding model mismatch.**\n\n{warning}")
 
-total_chunks = count(collection)
-documents = list_documents(collection)
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Indexed chunks", f"{total_chunks:,}")
-c2.metric("Documents", f"{len(documents):,}")
-c3.metric("Embedding model", settings.embed_model.split("/")[-1])
-c4.metric("Vector dimensions", settings.embed_dims or "unknown")
+# Reserved now so it keeps its place at the top of the page, but filled in
+# further down, after any indexing action has run. Streamlit renders tab
+# content from the final script run and cannot revisit what it already drew, so
+# reading the counts up front left the page reporting pre-action state: index
+# three documents successfully and the panel still said "Nothing is indexed yet"
+# until some unrelated interaction triggered another run.
+metrics_slot = st.empty()
 
 # ── upload ────────────────────────────────────────────────────────────────
 
@@ -102,10 +106,19 @@ if not accepted:
 else:
     st.caption("**Accepted formats:** " + " ".join(f"`{e}`" for e in accepted))
 
+# A file_uploader keeps its files for the life of the browser session. Without
+# clearing it, the script re-saves the same batch on every rerun, which made
+# "Clear the documents folder" a no-op: the files were deleted and then written
+# straight back by the next rerun. Rotating the widget's key is the standard
+# way to reset an uploader, and st.session_state carries the outcome across the
+# rerun that performs the reset.
+generation = st.session_state.get("upload_generation", 0)
+
 uploaded = st.file_uploader(
     "Choose files to upload",
     type=accepted,
     accept_multiple_files=True,
+    key=f"upload_{generation}",
     help=f"Up to {settings.max_files_per_batch} files per batch, "
     f"{settings.max_file_mb} MB each. ZIP archives are expanded and each "
     f"member is indexed as its own document.",
@@ -118,34 +131,103 @@ if uploaded and len(uploaded) > settings.max_files_per_batch:
     )
     uploaded = None
 
-saved: list[Path] = []
 if uploaded:
+    saved_paths: list[Path] = []
+    rejected: list[tuple[str, str]] = []
     with st.spinner("Saving uploads…"):
-        rejected: list[tuple[str, str]] = []
         for file in uploaded:
             try:
-                saved.append(
-                    store_upload(file.getvalue(), file.name, docs_dir=settings.docs_dir)
+                saved_paths.append(
+                    store_upload(
+                        file.getvalue(),
+                        file.name,
+                        docs_dir=settings.docs_dir,
+                    )
                 )
             except (ConversionError, ValueError) as exc:
                 rejected.append((file.name, str(exc)))
 
-    if saved:
+    st.session_state["upload_notice"] = {
+        "saved": [p.name for p in saved_paths],
+        "rejected": rejected,
+    }
+    st.session_state["pending_index"] = [str(p) for p in saved_paths]
+    # Bump the key and rerun so the next pass renders an empty uploader.
+    st.session_state["upload_generation"] = generation + 1
+    st.rerun()
+
+notice = st.session_state.pop("upload_notice", None)
+if notice:
+    if notice["saved"]:
+        names = notice["saved"]
         st.success(
-            f"Saved {len(saved)} file(s): "
-            + ", ".join(f"`{p.name}`" for p in saved[:10])
-            + ("…" if len(saved) > 10 else "")
+            f"Saved {len(names)} file(s): "
+            + ", ".join(f"`{n}`" for n in names[:10])
+            + ("…" if len(names) > 10 else "")
         )
-    if rejected:
-        with st.expander(f"{len(rejected)} file(s) rejected"):
-            for name, reason in rejected:
+    if notice["rejected"]:
+        with st.expander(f"{len(notice['rejected'])} file(s) rejected"):
+            for name, reason in notice["rejected"]:
                 st.error(f"`{name}`: {reason}")
 
 # ── indexing ──────────────────────────────────────────────────────────────
 
 st.subheader("2 · Index into the vector store")
 
-targets: list[Path] = saved if saved else []
+# ── large-document guidance ────────────────────────────────────────────────
+# Indexing runs inside this Streamlit session, which is tied to the browser
+# connection: closing the tab or losing connectivity can cancel a long job.
+# Large documents are better run from the command line, where nothing can
+# interrupt it and progress is visible.
+big_files = [
+    p
+    for p in sorted(settings.docs_dir.glob("*"))
+    if p.is_file()
+    and not p.name.startswith(".")
+    and p.stat().st_size > settings.large_document_mb * 1024 * 1024
+]
+if big_files:
+    total = sum(p.stat().st_size for p in big_files) / 1024 / 1024
+    with st.expander(
+        f"⚠️ {len(big_files)} large document(s) ({total:.0f} MB) — read this first",
+        expanded=False,
+    ):
+        st.markdown(
+            f"Anything above **{settings.large_document_mb} MB** can take many "
+            f"minutes here. Long indexing runs inside this browser session, so "
+            f"closing the tab can cancel the work. For large documents, prefer "
+            f"the command line:"
+        )
+        st.code(
+            ".venv/bin/python scripts/index.py --file "
+            + " \\\n                     --file ".join(
+                f'data/documents/{p.name}' for p in big_files
+            ),
+            language="bash",
+        )
+        st.caption(
+            "That reports live progress, survives a closed tab, and is "
+            "restartable — unchanged files are skipped."
+        )
+        st.dataframe(
+            [
+                {
+                    "file": p.name,
+                    "size": f"{p.stat().st_size / 1024 / 1024:.1f} MB",
+                    "estimated chunks": estimate_chunks(p, settings=settings)[0],
+                    "basis": estimate_chunks(p, settings=settings)[1],
+                }
+                for p in big_files
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+
+# Just-saved uploads, filtered to files that still exist on disk so a stale
+# session cannot send a deleted path to the indexer.
+targets: list[Path] = [
+    Path(p) for p in st.session_state.get("pending_index", []) if Path(p).is_file()
+]
 
 col_a, col_b = st.columns(2)
 with col_a:
@@ -288,6 +370,17 @@ if report is not None:
     if progress_log:
         with st.expander(f"Progress log ({len(progress_log)} entries)"):
             st.code("\n".join(progress_log[-400:]), language="text")
+
+# Refresh state now that every action above has run.
+total_chunks = count(collection)
+documents = list_documents(collection)
+
+with metrics_slot.container():
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Indexed chunks", f"{total_chunks:,}")
+    c2.metric("Documents", f"{len(documents):,}")
+    c3.metric("Embedding model", settings.embed_model.split("/")[-1])
+    c4.metric("Vector dimensions", settings.embed_dims or "unknown")
 
 # ── index management ──────────────────────────────────────────────────────
 

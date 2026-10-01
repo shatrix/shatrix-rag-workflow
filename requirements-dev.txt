@@ -4,3 +4,7 @@
 -r requirements.txt
 
 pytest>=8.0,<9
+
+# End-to-end tests drive a real browser against the real apps.
+# Uses the system Chrome, so `playwright install chromium` is not required.
+playwright>=1.40,<2

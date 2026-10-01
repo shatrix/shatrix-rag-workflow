@@ -157,6 +157,7 @@ class Settings:
     # Limits
     max_file_mb: int
     max_files_per_batch: int
+    large_document_mb: int
     max_zip_members: int
     max_zip_total_mb: int
     max_zip_expansion_ratio: int
@@ -266,6 +267,7 @@ def get_settings() -> Settings:
         max_upload_mb=_int("APP_MAX_UPLOAD_MB", max_file_mb, minimum=1),
         max_file_mb=max_file_mb,
         max_files_per_batch=_int("MAX_FILES_PER_BATCH", 50, minimum=1),
+        large_document_mb=_int("LARGE_DOCUMENT_MB", 25, minimum=1),
         max_zip_members=_int("MAX_ZIP_MEMBERS", 500, minimum=1),
         max_zip_total_mb=_int("MAX_ZIP_TOTAL_MB", 500, minimum=1),
         max_zip_expansion_ratio=_int("MAX_ZIP_EXPANSION_RATIO", 100, minimum=1),

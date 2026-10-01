@@ -460,3 +460,50 @@ def rescan_directory(
         max_payload_bytes=max_payload_bytes,
         progress=progress,
     )
+
+#: Extensions whose chunk count can be estimated from a character count
+#: without reading the whole file. Everything else falls back to a size proxy.
+_TEXTY = {".md", ".markdown", ".txt", ".text", ".json", ".jsonl", ".csv",
+          ".htm", ".html", ".xml", ".rss", ".atom", ".epub", ".ipynb",
+          ".log", ".rst", ".tex", ".yaml", ".yml", ".toml", ".ini"}
+
+#: Bytes per character assumed for the text formats above. Deliberately high so
+#: the estimate over-reports slightly rather than under-reporting.
+_CHARS_PER_BYTE = 0.25
+
+
+def estimate_chunks(
+    path: Path, *, settings: Settings | None = None
+) -> tuple[int, str]:
+    """Estimate how many chunks a document will produce.
+
+    Uses only ``stat``, so it stays cheap for a very large file. The result is
+    an estimate, not a promise: it is there to tell an operator whether a job
+    belongs in the browser or on the command line.
+
+    Returns:
+        ``(chunks, basis)`` where ``basis`` explains how the number was reached.
+    """
+    settings = settings or get_settings()
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0, "unreadable"
+
+    if path.suffix.lower() in _TEXTY:
+        characters = size * _CHARS_PER_BYTE
+        return (
+            max(1, int(characters / max(settings.max_chunk_chars, 1))),
+            "from file size",
+        )
+
+    # Binary formats (PDF, Office, archives) are dominated by embedded media
+    # and fonts, so bytes map poorly to text. Roughly 50 KB of PDF per page and
+    # ~400 characters of text per page is a serviceable rule of thumb.
+    bytes_per_page = 50 * 1024
+    pages = max(1, size // bytes_per_page)
+    characters = pages * 400
+    return (
+        max(1, int(characters / max(settings.max_chunk_chars, 1))),
+        f"~{pages} pages from file size",
+    )

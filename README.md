@@ -441,6 +441,9 @@ upload → sanitise → save to data/documents → convert to Markdown
 5. **Upsert.** Deterministic ids (`<file-hash>:<index>`) mean re-indexing the
    same content overwrites rather than duplicates.
 
+An archive's members share the archive as their source, so the index lists one
+row per archive. Deleting that row removes all of its members.
+
 ### Two details that matter for real documents
 
 **Code fences are respected when detecting headings.** Every technical
@@ -777,15 +780,59 @@ placeholders and systemd will reject them if you install one directly. Use
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest              # 170 tests, no network required
-.venv/bin/python -m pytest -v
+.venv/bin/python -m pytest               # everything
+.venv/bin/python -m pytest tests/ --ignore=tests/e2e    # unit tests only, ~6s
 .venv/bin/python scripts/doctor.py
 ```
 
-The test suite never touches the network or a live vector store: OpenRouter and
-Chroma are replaced with in-memory doubles (`tests/conftest.py`).
+Run `./scripts/run-local.sh` while editing.
 
-Run `./scripts/run-local.sh` while editing. Both apps reload on save.
+**Note:** Streamlit reloads its *script* when a file changes, but it does not
+re-import changed Python modules. After editing anything under `app/`, restart
+the services or you will see `ImportError` for a name you just added:
+
+```bash
+systemctl --user restart rag-query.service rag-admin.service
+```
+
+### Unit tests
+
+No network and no live vector store. OpenRouter and Chroma are replaced with
+in-memory doubles (`tests/conftest.py`).
+
+### End-to-end tests
+
+`tests/e2e/` drives a real browser against the real apps, so it covers the
+wiring that unit tests structurally cannot: button handlers, session state,
+upload lifecycle, and what a user actually sees.
+
+```bash
+.venv/bin/python -m pytest tests/e2e -v       # needs Chrome; uses channel="chrome"
+```
+
+Each session boots a fully isolated stack on unused ports — a local OpenRouter
+stub (`tests/e2e/fake_openrouter.py`, so nothing is billed and nothing is
+rate-limited), a real `chroma run` on its own data directory, and both real
+Streamlit apps. Your installation, `.env`, index and documents are never
+touched.
+
+Covered:
+
+| Area | What it verifies |
+|---|---|
+| Destructive paths | Delete one document, delete the whole collection, force re-index, clear the documents folder, and that deleting from the index leaves the source file alone |
+| State refresh | The panel reflects an action in the same run that performed it |
+| Uploader lifecycle | Uploads are written once and are not re-saved on later reruns |
+| Multi-file batches | A corrupt file in a batch does not lose the good ones |
+| Archives | Members become separate documents, unsafe members are refused, empty archives do not crash |
+| Large documents | The admin app points at the command line before starting a long job |
+| Query app | Submitting a question, streamed answers, sources, conversation history across turns, clearing history, and that history does not leak between sessions |
+
+This suite earned its keep immediately: it found that "Clear the documents
+folder" was a silent no-op, because the file uploader re-saved the batch on
+every rerun and the deleted files came straight back. It also found that the
+indexed-documents panel reported pre-action state, since it was read before the
+button that changed it.
 
 ---
 
